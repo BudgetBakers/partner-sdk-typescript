@@ -1,0 +1,43 @@
+{
+  "name": "@budgetbakers/partner-sdk",
+  "version": "0.1.0",
+  "description": "BudgetBakers Partner API server SDK (AISP): typed client, webhooks verification, hosted connect sessions.",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "bin": {
+    "partner-sdk-conformance": "./dist/conformance/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.10.2",
+    "eslint": "9.39.5",
+    "globals": "15.15.0",
+    "tsup": "8.3.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0",
+    "vitest": "2.1.9"
+  }
+}
