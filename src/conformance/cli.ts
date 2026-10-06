@@ -3,13 +3,13 @@
 // probe | scenario | webhooksig | events.
 
 import { readFileSync } from 'node:fs';
-import { BudgetBakers, type ClientScope } from '../client';
+import { BudgetBakers, type ClientScope, type ListTransactionsParams } from '../client';
 import { sumAmounts, type DecimalString } from '../decimal';
 import { PartnerApiError } from '../errors';
 import { parseEvent, verify } from '../webhooks';
-import type { Account, ConnectSession } from '../types';
+import type { Account, ClientCreateRequest, ConnectSession } from '../types';
 
-const IDENTITY = { lang: 'typescript', sdk: '@budgetbakers/partner-sdk', version: '0.1.1' };
+const IDENTITY = { lang: 'typescript', sdk: '@budgetbakers/partner-sdk', version: '0.2.0' };
 
 interface DriverConfig {
   retryBaseMs: number;
@@ -43,6 +43,8 @@ class UnresolvedVar extends Error {
 const s = (args: Record<string, unknown>, key: string): string => String(args[key]);
 const opt = (args: Record<string, unknown>, key: string): string | undefined =>
   args[key] === undefined ? undefined : String(args[key]);
+const optNum = (args: Record<string, unknown>, key: string): number | undefined =>
+  typeof args[key] === 'number' ? args[key] : undefined;
 
 function accountView(a: Account) {
   return {
@@ -52,6 +54,55 @@ function accountView(a: Account) {
     currencyCode: a.currencyCode ?? null,
     iban: a.iban ?? null,
   };
+}
+
+function accountViewV2(a: Account) {
+  return { id: a.id ?? null, balance: a.balance ?? null, subscriptionStatus: a.subscriptionStatus ?? null };
+}
+
+function transactionParams(args: Record<string, unknown>): ListTransactionsParams {
+  const variableSymbol = opt(args, 'variableSymbol');
+  return {
+    limit: optNum(args, 'limit'),
+    sort: opt(args, 'sort') as ListTransactionsParams['sort'],
+    order: opt(args, 'order') as ListTransactionsParams['order'],
+    dateFrom: opt(args, 'dateFrom'),
+    dateTo: opt(args, 'dateTo'),
+    recordState: opt(args, 'recordState') as ListTransactionsParams['recordState'],
+    variableSymbol: variableSymbol === undefined ? undefined : [variableSymbol],
+    sinceSeq: optNum(args, 'sinceSeq'),
+    sinceCreatedSeq: optNum(args, 'sinceCreatedSeq'),
+  };
+}
+
+async function walkAccounts(scope: ClientScope, args: Record<string, unknown>) {
+  const accounts: Account[] = [];
+  let pages = 0;
+  for await (const page of scope.connections.accountPages(s(args, 'connectionId'), {
+    limit: optNum(args, 'limit'),
+  })) {
+    pages += 1;
+    accounts.push(...page.data);
+  }
+  return { accounts, pages };
+}
+
+async function walkTransactions(scope: ClientScope, args: Record<string, unknown>) {
+  const amounts: (DecimalString | null)[] = [];
+  const seqs: (number | null)[] = [];
+  let count = 0;
+  let pages = 0;
+  let anyRecurrent = false;
+  for await (const page of scope.accounts.transactionPages(s(args, 'accountId'), transactionParams(args))) {
+    pages += 1;
+    count += page.data.length;
+    for (const t of page.data) {
+      amounts.push(t.amount ?? null);
+      seqs.push(typeof t.seq === 'number' ? t.seq : null);
+      if (t.enrichment?.recurrent === true) anyRecurrent = true;
+    }
+  }
+  return { count, pages, amounts, seqs, sumAmount: sumAmounts(amounts), anyRecurrent };
 }
 
 type OpFn = (bb: BudgetBakers, scope: (a: Record<string, unknown>) => ClientScope, args: Record<string, unknown>, config: DriverConfig) => Promise<unknown>;
@@ -65,7 +116,7 @@ const OPS: Record<string, OpFn> = {
     let pages = 0;
     for await (const page of bb.providers.pages({
       country: opt(args, 'country'),
-      limit: args.limit as number | undefined,
+      limit: optNum(args, 'limit'),
     })) {
       pages += 1;
       count += page.data.length;
@@ -74,7 +125,7 @@ const OPS: Record<string, OpFn> = {
     return { count, pages, ids };
   },
 
-  'clients.create': (bb, _scope, args) => bb.clients.create(args),
+  'clients.create': (bb, _scope, args) => bb.clients.create(args as unknown as ClientCreateRequest),
   'clients.get': (bb, _scope, args) => bb.clients.get(s(args, 'clientId')),
   'clients.getByExternalId': (bb, _scope, args) => bb.clients.getByExternalId(s(args, 'externalId')),
   'clients.delete': async (_bb, scope, args) => {
@@ -137,18 +188,47 @@ const OPS: Record<string, OpFn> = {
     return { count: accounts.length, accounts: accounts.map(accountView) };
   },
   'transactions.listAll': async (_bb, scope, args) => {
-    const amounts: (DecimalString | null)[] = [];
+    const { count, pages, amounts, sumAmount } = await walkTransactions(scope(args), args);
+    return { count, pages, amounts, sumAmount };
+  },
+
+  // ---- v2-shaped views (same SDK calls, the normalization keeps the v2 fields) --
+
+  'clientsV2.create': async (bb, _scope, args) => {
+    const client = await bb.clients.create(args as unknown as ClientCreateRequest);
+    return { id: client.id ?? null, externalId: client.externalId ?? null };
+  },
+  'clientsV2.getByExternalId': async (bb, _scope, args) => {
+    const client = await bb.clients.getByExternalId(s(args, 'externalId'));
+    return { count: client === null ? 0 : 1, ids: client === null ? [] : [client.id] };
+  },
+  'connectionsV2.get': async (_bb, scope, args) => {
+    const c = await scope(args).connections.get(s(args, 'connectionId'));
+    return { id: c.id ?? null, state: c.state ?? null, consentExpiresAt: c.consentExpiresAt ?? null };
+  },
+  'providersV2.listAll': async (bb, _scope, args) => {
+    const codes: unknown[] = [];
+    const statuses: unknown[] = [];
     let count = 0;
     let pages = 0;
-    for await (const page of scope(args).accounts.transactionPages(s(args, 'accountId'), {
-      limit: args.limit as number | undefined,
+    for await (const page of bb.providers.pages({
+      country: opt(args, 'country'),
+      search: opt(args, 'search'),
+      limit: optNum(args, 'limit'),
     })) {
       pages += 1;
       count += page.data.length;
-      amounts.push(...page.data.map((t) => t.amount ?? null));
+      codes.push(...page.data.map((p) => p.code ?? null));
+      statuses.push(...page.data.map((p) => p.status ?? null));
     }
-    return { count, pages, amounts, sumAmount: sumAmounts(amounts) };
+    return { count, pages, codes, statuses };
   },
+  'accountsV2.list': async (_bb, scope, args) => {
+    const { accounts, pages } = await walkAccounts(scope(args), args);
+    return { count: accounts.length, pages, accounts: accounts.map(accountViewV2) };
+  },
+  'accountsV2.get': async (_bb, scope, args) => accountViewV2(await scope(args).accounts.get(s(args, 'accountId'))),
+  'transactionsV2.listAll': (_bb, scope, args) => walkTransactions(scope(args), args),
 };
 
 function interpolateArgs(

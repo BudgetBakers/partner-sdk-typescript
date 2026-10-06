@@ -1,14 +1,18 @@
-// The SDK surface (DESIGN.md §9.1): client-scoped ergonomics that hide the
+// The SDK surface: client-scoped ergonomics that hide the
 // X-Client-Id header, cursor-pagination async iterators, automatic
 // Idempotency-Key on creates (explicit override supported), and a
-// connect-session polling helper.
+// connect-session polling helper. Reads and creates live on /v2; the
+// connection lifecycle actions live on /v1.
 
 import { randomUUID } from 'node:crypto';
 import { Transport, type RequestOptions } from './transport';
 import * as webhooks from './webhooks';
 import type {
   Account,
+  AccountPage,
   Client,
+  ClientCreateRequest,
+  ClientPage,
   Connection,
   ConnectionCreateResponse,
   ConnectSession,
@@ -25,7 +29,7 @@ import type {
 export interface BudgetBakersOptions {
   /** Partner API key (bb_test_… / bb_live_…). Selects the sandbox/live mode. */
   apiKey: string;
-  /** Cluster base URL; defaults to the acceptance cluster. */
+  /** Partner API base URL; defaults to the production edge (the key selects the mode). */
   baseUrl?: string;
   /** Backoff base for 429/5xx retries; production default 500 ms. */
   retryBaseMs?: number;
@@ -35,7 +39,7 @@ export interface BudgetBakersOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export const DEFAULT_BASE_URL = 'https://partner.test.bbapi.dev';
+export const DEFAULT_BASE_URL = 'https://aisp-partner.bbapi.io';
 
 interface IdempotentOptions {
   /** Explicit Idempotency-Key; auto-generated UUID when omitted. */
@@ -79,10 +83,25 @@ export interface ListProvidersParams {
   limit?: number;
 }
 
+export interface ListAccountsParams {
+  limit?: number;
+}
+
 export interface ListTransactionsParams {
   limit?: number;
-  /** Filter by variable symbols (≤20). */
-  variableSymbol?: string[];
+  /** `recordDate` (default) or `amount`; the `id` tiebreak makes every sort total. */
+  sort?: 'recordDate' | 'amount';
+  order?: 'asc' | 'desc';
+  /** Inclusive calendar-date bounds (UTC) on recordDate, `YYYY-MM-DD`. */
+  dateFrom?: string;
+  dateTo?: string;
+  recordState?: 'Cleared' | 'Uncleared';
+  /** Filter by details.variableSymbol (≤20 values; leading zeros ignored). */
+  variableSymbol?: readonly string[];
+  /** Delta sync: rows whose seq is greater than this, ordered by seq. Combinable only with limit. */
+  sinceSeq?: number;
+  /** Create-only feed: rows whose createdSeq is greater than this. Combinable only with limit. */
+  sinceCreatedSeq?: number;
 }
 
 /** Everything scoped to one end user (X-Client-Id header). */
@@ -96,19 +115,25 @@ export class ClientScope {
     return this.transport.request<T>(method, path, { ...req, clientId: this.clientId });
   }
 
-  /** Delete this client and purge related data (DPA/SLA). */
+  private requestData<T>(method: string, path: string, req: RequestOptions = {}): Promise<T> {
+    return this.transport.requestData<T>(method, path, { ...req, clientId: this.clientId });
+  }
+
+  /** Delete this client and cascade to their connections, accounts and transactions. */
   async delete(): Promise<void> {
-    await this.request<void>('DELETE', `/v1/clients/${encodeURIComponent(this.clientId)}`);
+    await this.request<void>('DELETE', `/v2/clients/${encodeURIComponent(this.clientId)}`);
   }
 
   readonly connections = {
+    // Lifecycle actions (create, delete, refresh, reconnect, revoke) live on /v1.
     create: (params: { providerId: string } & IdempotentOptions): Promise<ConnectionCreateResponse> =>
       this.request('POST', '/v1/connections', {
         body: { providerId: params.providerId },
         idempotencyKey: params.idempotencyKey ?? randomUUID(),
       }),
+    /** The stored connection record: state, provider, consent expiry. */
     get: (connectionId: string): Promise<Connection> =>
-      this.request('GET', `/v1/connections/${encodeURIComponent(connectionId)}`),
+      this.requestData('GET', `/v2/connections/${encodeURIComponent(connectionId)}`),
     delete: async (connectionId: string): Promise<void> => {
       await this.request<void>('DELETE', `/v1/connections/${encodeURIComponent(connectionId)}`);
     },
@@ -126,12 +151,27 @@ export class ClientScope {
     revoke: async (connectionId: string): Promise<void> => {
       await this.request<void>('PATCH', `/v1/connections/${encodeURIComponent(connectionId)}/revoke`);
     },
-    /** Raw array, capped at 100 by the API (not paginated). */
-    listAccounts: (connectionId: string): Promise<Account[]> =>
-      this.request('GET', `/v1/connections/${encodeURIComponent(connectionId)}/accounts`),
+    /** Every account of the connection, all pages walked; `Disabled` (unselected) accounts included. */
+    listAccounts: async (connectionId: string): Promise<Account[]> => {
+      const accounts: Account[] = [];
+      for await (const page of this.connections.accountPages(connectionId)) accounts.push(...page.data);
+      return accounts;
+    },
+    /** Page-level iteration when you need cursors/limits. */
+    accountPages: (
+      connectionId: string,
+      params: ListAccountsParams = {},
+    ): AsyncGenerator<AccountPage, void, undefined> =>
+      iteratePages<Account>((cursor) =>
+        this.request('GET', `/v2/connections/${encodeURIComponent(connectionId)}/accounts`, {
+          query: { limit: params.limit, nextCursor: cursor },
+        }),
+      ),
   };
 
   readonly accounts = {
+    get: (accountId: string): Promise<Account> =>
+      this.requestData('GET', `/v2/accounts/${encodeURIComponent(accountId)}`),
     /** Iterate every transaction across pages: `for await (const tx of …)`. */
     transactions: (accountId: string, params: ListTransactionsParams = {}) =>
       iterateItems(this.accounts.transactionPages(accountId, params)),
@@ -141,10 +181,17 @@ export class ClientScope {
       params: ListTransactionsParams = {},
     ): AsyncGenerator<TransactionPage, void, undefined> =>
       iteratePages<Transaction>((cursor) =>
-        this.request('GET', `/v1/accounts/${encodeURIComponent(accountId)}/transactions`, {
+        this.request('GET', `/v2/accounts/${encodeURIComponent(accountId)}/transactions`, {
           query: {
             limit: params.limit,
-            variableSymbol: params.variableSymbol && JSON.stringify(params.variableSymbol),
+            sort: params.sort,
+            order: params.order,
+            dateFrom: params.dateFrom,
+            dateTo: params.dateTo,
+            recordState: params.recordState,
+            variableSymbol: params.variableSymbol,
+            sinceSeq: params.sinceSeq,
+            sinceCreatedSeq: params.sinceCreatedSeq,
             nextCursor: cursor,
           },
         }),
@@ -152,7 +199,7 @@ export class ClientScope {
   };
 
   readonly connectSessions = {
-    /** Create a hosted connect session; hand `hostedUrl` to the Link SDK / browser.
+    /** Create a hosted connect session; open `hostedUrl` in the user's browser.
      *  `connectionId` reconnects an existing connection instead of creating one
      *  (the bank picker is then skipped, so do not also pass `providerId`). */
     create: (
@@ -161,13 +208,13 @@ export class ClientScope {
       const body: Record<string, unknown> = { returnUrl: params.returnUrl };
       if (params.providerId !== undefined) body.providerId = params.providerId;
       if (params.connectionId !== undefined) body.connectionId = params.connectionId;
-      return this.request('POST', '/v1/connect-sessions', {
+      return this.request('POST', '/v2/connect-sessions', {
         body,
         idempotencyKey: params.idempotencyKey ?? randomUUID(),
       });
     },
     get: (sessionId: string): Promise<ConnectSession> =>
-      this.request('GET', `/v1/connect-sessions/${encodeURIComponent(sessionId)}`),
+      this.request('GET', `/v2/connect-sessions/${encodeURIComponent(sessionId)}`),
     /** Poll until the session reaches a terminal state (or maxPolls). */
     waitForTerminal: async (
       sessionId: string,
@@ -209,16 +256,17 @@ export class BudgetBakers {
 
   readonly clients = {
     /** Upserts by externalId: an existing externalId returns the existing client. */
-    create: (params: {
-      externalId?: string;
-      email?: string;
-      countryCode?: string;
-      [key: string]: unknown;
-    }): Promise<Client> => this.transport.request('POST', '/v1/clients', { body: params }),
+    create: (params: ClientCreateRequest): Promise<Client> =>
+      this.transport.requestData('POST', '/v2/clients', { body: params }),
     get: (clientId: string): Promise<Client> =>
-      this.transport.request('GET', `/v1/clients/${encodeURIComponent(clientId)}`),
-    getByExternalId: (externalId: string): Promise<Client> =>
-      this.transport.request('GET', '/v1/clients', { query: { externalId } }),
+      this.transport.requestData('GET', `/v2/clients/${encodeURIComponent(clientId)}`, { clientId }),
+    /** Exact match on your externalId; null when no client carries it. */
+    getByExternalId: async (externalId: string): Promise<Client | null> => {
+      const page = await this.transport.request<ClientPage>('GET', '/v2/clients', {
+        query: { externalId },
+      });
+      return page.data[0] ?? null;
+    },
   };
 
   readonly providers = {
@@ -226,7 +274,7 @@ export class BudgetBakers {
     list: (params: ListProvidersParams = {}) => iterateItems(this.providers.pages(params)),
     pages: (params: ListProvidersParams = {}): AsyncGenerator<ProviderPage, void, undefined> =>
       iteratePages<Provider>((cursor) =>
-        this.transport.request('GET', '/v1/providers', {
+        this.transport.request('GET', '/v2/providers', {
           query: {
             country: params.country,
             search: params.search,
@@ -240,7 +288,7 @@ export class BudgetBakers {
   readonly partner = {
     /** Capability discovery — self-description of the calling partner + key mode. */
     getConfig: (): Promise<PartnerConfigResponse> =>
-      this.transport.request('GET', '/v1/partner/config'),
+      this.transport.request('GET', '/v2/partner/config'),
   };
 
   /** Webhook helpers: `verify` (signature) and `parseEvent` (typed events). */

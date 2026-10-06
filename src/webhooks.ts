@@ -101,6 +101,8 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'TransactionsFetchingFailed',
   'ConnectionCreateSuccess',
   'ConnectionCreateFailed',
+  'ConnectionReconnectSuccess',
+  'ConnectionReconnectFailed',
   'ConnectionRefreshSuccess',
   'ConnectionRefreshFailed',
   'ConnectionDeleted',
@@ -112,7 +114,7 @@ const KNOWN_FIELDS = new Set(['eventId', 'type', 'clientId', 'connectionId', 'cr
 
 /**
  * Parse a delivery body into a typed event. NEVER throws: unknown types pass
- * through as UnknownEvent (respond 2xx and ignore — D11), malformed JSON
+ * through as UnknownEvent (respond 2xx and ignore), malformed JSON
  * yields a structured parse error.
  */
 export function parseEvent(rawBody: Buffer | string): ParsedWebhook {

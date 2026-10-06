@@ -10,9 +10,17 @@ describe('DecimalString helpers', () => {
     expect(toDecimalString('0')).toBe('0.00');
   });
 
-  it('rejects exponents and >2 decimals', () => {
+  it('keeps a value-carrying third decimal (v2 MoneyAmount) and trims a zero one', () => {
+    expect(toDecimalString('1.005')).toBe('1.005');
+    expect(toDecimalString('816.000')).toBe('816.00');
+    expect(() => toCents(toDecimalString('1.005'))).toThrow(RangeError);
+    expect(isDecimalString('1.005')).toBe(true);
+    expect(isDecimalString('1.000')).toBe(false);
+  });
+
+  it('rejects exponents and >3 decimals', () => {
     expect(() => toDecimalString('1e2')).toThrow(RangeError);
-    expect(() => toDecimalString('1.234')).toThrow(RangeError);
+    expect(() => toDecimalString('1.2345')).toThrow(RangeError);
     expect(() => toDecimalString('abc')).toThrow(RangeError);
   });
 

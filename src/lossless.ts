@@ -63,6 +63,10 @@ function revive(value: unknown, key: string | null): unknown {
     const literal = value.slice(1);
     return key !== null && MONEY_KEYS.has(key) ? toDecimalString(literal) : Number(literal);
   }
+  // v2 serves money as decimal strings; v1 served bare numbers (handled above).
+  if (typeof value === 'string' && key !== null && MONEY_KEYS.has(key)) {
+    return toDecimalString(value);
+  }
   if (Array.isArray(value)) {
     return value.map((el) => revive(el, key));
   }
@@ -74,7 +78,7 @@ function revive(value: unknown, key: string | null): unknown {
   return value;
 }
 
-/** Parse an API response body: money keys → DecimalString, other numbers → number. */
+/** Parse an API response body: money keys (string or number) → DecimalString, other numbers → number. */
 export function parseBody(text: string): unknown {
   return revive(JSON.parse(quoteNumbers(text)), null);
 }

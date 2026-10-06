@@ -1,9 +1,11 @@
-// @budgetbakers/partner-sdk — BudgetBakers Partner API server SDK (WP4.1).
-// Spec: spec/partner-api-v1.1.yaml (single source of truth, D9).
+// @budgetbakers/partner-sdk - BudgetBakers Partner API server SDK.
+// Follows the Partner API v2 reference; the connection lifecycle actions
+// follow the v1.1 reference.
 
 export { BudgetBakers, ClientScope, DEFAULT_BASE_URL } from './client';
 export type {
   BudgetBakersOptions,
+  ListAccountsParams,
   ListProvidersParams,
   ListTransactionsParams,
   WaitForTerminalOptions,
@@ -32,13 +34,19 @@ export type { VerifyResult } from './webhooks';
 
 export type {
   Account,
+  AccountPage,
   Client,
+  ClientCreateRequest,
+  ClientPage,
   Connection,
   ConnectionCreateResponse,
   ConnectionState,
   ConnectSession,
   ConnectSessionCreateResponse,
   ConnectSessionState,
+  Enrichment,
+  EnrichmentCategory,
+  Merchant,
   Mode,
   Page,
   ParsedWebhook,
@@ -48,8 +56,9 @@ export type {
   ProviderPage,
   RefreshAccepted,
   ResultCode,
+  SubscriptionStatus,
   Transaction,
-  TransactionEnrichment,
+  TransactionDetails,
   TransactionPage,
   UnknownEvent,
   WebhookEvent,

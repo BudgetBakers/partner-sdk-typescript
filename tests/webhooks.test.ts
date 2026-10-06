@@ -1,5 +1,5 @@
 // The webhook verify implementation is pinned by the language-neutral vectors
-// in contract-tests/fixtures/webhooksig.json (WP0.2) — sign AND verify.
+// in contract-tests/fixtures/webhooksig.json - sign AND verify.
 // Event parsing is pinned by contract-tests/fixtures/events.json.
 
 import { readFileSync } from 'node:fs';

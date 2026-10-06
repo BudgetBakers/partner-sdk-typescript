@@ -1,6 +1,7 @@
-// API models, hand-written from spec/partner-api-v1.1.yaml (the single source
-// of truth; D9). Only `id` is guaranteed non-null on Client / Connection /
-// Account / Transaction — every other field is nullable and SDKs must not
+// API models, hand-written from the Partner API v2 reference. The connection
+// lifecycle actions (create, refresh, reconnect, revoke, delete) keep their
+// v1.1 shapes. Only `id` is guaranteed non-null on Client / Connection /
+// Account / Transaction unless the spec marks a field required; SDKs must not
 // assume presence. Amounts are DecimalString (never float).
 
 import type { DecimalString } from './decimal';
@@ -10,18 +11,20 @@ export type Mode = 'sandbox' | 'live';
 
 export interface Provider {
   id: string;
-  name?: string | null;
+  name: string;
+  code?: string | null;
   countryCode?: string | null;
   logoUrl?: string | null;
   bicCodes?: string[] | null;
-  timeZone?: string | null;
+  /** Effective visibility for this partner, composed from every status layer the platform applies. */
   status?: 'Active' | 'Inactive' | 'Hidden' | 'Disabled' | null;
-  code?: string | null;
+  mode?: 'Api' | 'Web' | null;
+  timeZone?: string | null;
 }
 
 export interface Page<T> {
   limit: number;
-  /** Opaque; iterate until null. Offset-based today — not stable across concurrent inserts. */
+  /** Opaque keyset cursor; iterate until null. Send it with the same sort/filter parameters it was issued with. */
   nextCursor: string | null;
   data: T[];
 }
@@ -35,14 +38,22 @@ export interface Client {
   countryCode?: string | null;
 }
 
+export interface ClientCreateRequest {
+  email: string;
+  countryCode: string;
+  /** Your own user id. Re-posting an existing externalId returns the existing client (upsert). */
+  externalId?: string;
+}
+
+export type ClientPage = Page<Client>;
+
 export type ConnectionState = 'Pending' | 'Active' | 'Inactive' | 'Disabled';
 
 export interface Connection {
   id: string;
   state?: ConnectionState | null;
   providerId?: string | null;
-  errorDesc?: string | null;
-  createdAt?: string | null;
+  consentExpiresAt?: string | null;
 }
 
 export interface ConnectionCreateResponse {
@@ -79,10 +90,13 @@ export interface ConnectSession {
 export interface ConnectSessionCreateResponse {
   /** Opaque — never parse. */
   sessionId: string;
-  /** Opaque hosted-flow URL — hand to the Link SDK / browser as-is. */
+  /** Opaque hosted-flow URL; open it in the user's browser as-is. */
   hostedUrl: string;
   expiresAt: string;
 }
+
+/** `Active` accounts receive transactions; `Disabled` ones were left unselected in the account picker. */
+export type SubscriptionStatus = 'Active' | 'Unsubscribed' | 'Inactive' | 'Disabled';
 
 export interface Account {
   id: string;
@@ -91,24 +105,56 @@ export interface Account {
   balance?: DecimalString | null;
   currencyCode?: string | null;
   iban?: string | null;
+  subscriptionStatus: SubscriptionStatus;
 }
 
-export interface TransactionEnrichment {
-  category?: string | null;
-  merchantName?: string | null;
-  [key: string]: unknown;
+export type AccountPage = Page<Account>;
+
+export interface EnrichmentCategory {
+  categoryId: number;
+  categoryName?: string | null;
+  subcategoryId?: number | null;
+  subcategoryName?: string | null;
+}
+
+export interface Merchant {
+  id?: string;
+  name?: string;
+  logoUri?: string | null;
+}
+
+/** Null when enrichment is disabled for the partner. */
+export interface Enrichment {
+  category?: EnrichmentCategory | null;
+  merchant?: Merchant | null;
+  recurrent: boolean;
+}
+
+export interface TransactionDetails {
+  variableSymbol?: string | null;
+  constantSymbol?: string | null;
+  specificSymbol?: string | null;
+  transactionCode?: string | null;
+  creditorReference?: string | null;
+  externalCategoryName?: string | null;
+  mccCode?: string | null;
+  others?: Record<string, unknown> | null;
 }
 
 export interface Transaction {
   id: string;
+  /** Change sequence for `sinceSeq` delta sync; re-issued on every server-side modification. */
+  seq: number;
+  /** Insert-order sequence for the `sinceCreatedSeq` create-only feed; never changes. */
+  createdSeq: number;
   amount?: DecimalString | null;
   currencyCode?: string | null;
   recordState?: 'Cleared' | 'Uncleared' | null;
-  bookingDate?: string | null;
-  description?: string | null;
-  variableSymbol?: string | null;
-  enrichment?: TransactionEnrichment | null;
-  [key: string]: unknown;
+  recordDate: string;
+  note?: string | null;
+  counterParty?: string | null;
+  enrichment?: Enrichment | null;
+  details?: TransactionDetails | null;
 }
 
 export type TransactionPage = Page<Transaction>;
@@ -146,6 +192,8 @@ export type WebhookEventType =
   | 'TransactionsFetchingFailed'
   | 'ConnectionCreateSuccess'
   | 'ConnectionCreateFailed'
+  | 'ConnectionReconnectSuccess'
+  | 'ConnectionReconnectFailed'
   | 'ConnectionRefreshSuccess'
   | 'ConnectionRefreshFailed'
   | 'ConnectionDeleted'
@@ -180,7 +228,7 @@ export interface WebhookEvent {
   extra: Record<string, unknown>;
 }
 
-/** An event type this SDK version does not know — process 2xx and ignore (D11). */
+/** An event type this SDK version does not know - process 2xx and ignore. */
 export interface UnknownEvent {
   kind: 'unknown';
   type: string;

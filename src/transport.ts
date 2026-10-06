@@ -18,7 +18,8 @@ export interface TransportOptions {
 
 export interface RequestOptions {
   clientId?: string;
-  query?: Record<string, string | number | undefined>;
+  /** Array values are repeated (`?k=a&k=b`), the v2 encoding for list parameters. */
+  query?: Record<string, string | number | readonly string[] | undefined>;
   body?: unknown;
   idempotencyKey?: string;
   signal?: AbortSignal;
@@ -27,13 +28,31 @@ export interface RequestOptions {
 const RETRYABLE_METHODS = new Set(['GET', 'DELETE', 'PATCH', 'PUT']);
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Unwrap the v2 single-resource envelope `{ "data": ... }`. */
+export function unwrapData<T>(body: unknown): T {
+  if (body !== null && typeof body === 'object' && 'data' in body) {
+    return (body as { data: T }).data;
+  }
+  throw new TypeError('partner API: expected a { data } envelope');
+}
+
 export class Transport {
   constructor(private readonly opts: TransportOptions) {}
+
+  /** request() for v2 single-resource operations: returns the envelope's `data`. */
+  async requestData<T>(method: string, path: string, req: RequestOptions = {}): Promise<T> {
+    return unwrapData<T>(await this.request<unknown>(method, path, req));
+  }
 
   async request<T>(method: string, path: string, req: RequestOptions = {}): Promise<T> {
     const url = new URL(this.opts.baseUrl + path);
     for (const [k, v] of Object.entries(req.query ?? {})) {
-      if (v !== undefined) url.searchParams.set(k, String(v));
+      if (v === undefined) continue;
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, item);
+      } else {
+        url.searchParams.set(k, String(v));
+      }
     }
     const headers: Record<string, string> = {
       Accept: 'application/json',
