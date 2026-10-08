@@ -9,7 +9,7 @@ import { PartnerApiError } from '../errors';
 import { parseEvent, verify } from '../webhooks';
 import type { Account, ClientCreateRequest, ConnectSession } from '../types';
 
-const IDENTITY = { lang: 'typescript', sdk: '@budgetbakers/partner-sdk', version: '0.2.0' };
+const IDENTITY = { lang: 'typescript', sdk: '@budgetbakers/partner-sdk', version: '0.2.1' };
 
 interface DriverConfig {
   retryBaseMs: number;

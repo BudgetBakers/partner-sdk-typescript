@@ -8,6 +8,8 @@ site.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-08
+
 ### Added
 
 - Published on npm as `@budgetbakers/partner-sdk`: `npm install
